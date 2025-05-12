@@ -24,7 +24,7 @@ logs
 .vscode/
 *.swp
 *.swo
-
+.gitignore
 # OS files
 .DS_Store
 Thumbs.db 
