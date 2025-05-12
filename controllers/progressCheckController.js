@@ -176,33 +176,6 @@ const analyzeProgress = async (req, res) => {
 
     // Prepare detailed analysis for GPT
     const analysisPrompt = `As an IB Mathematics expert tutor, analyze this student's worksheet performance in detail.
-Please provide a comprehensive analysis of their understanding, progress, and readiness for advancement.
-
-Worksheet Details:
-Topic: ${worksheetResult.topic}
-Difficulty: ${worksheetResult.difficulty}
-Overall Score: ${worksheetResult.totalScore}/${worksheetResult.totalPossibleScore} (${worksheetResult.percentageScore}%)
-Journey ID: ${worksheetResult.journeyId}
-Areas of Improvement: ${worksheetResult.areasofimprovement}
-Areas of Strength: ${worksheetResult.areasofstrength}
-
-${topicProgress[worksheetResult.topic] && topicProgress[worksheetResult.topic].attempts ? 
-  `Previous Attempts: 
-   - Easy: ${(topicProgress[worksheetResult.topic].attempts.easy || 0)} attempts
-   - Medium: ${(topicProgress[worksheetResult.topic].attempts.medium || 0)} attempts
-   - Hard: ${(topicProgress[worksheetResult.topic].attempts.hard || 0)} attempts
-   - Total: ${(topicProgress[worksheetResult.topic].attempts.total || 0)} attempts` : 
-  'No previous attempts recorded'}
-
-Question-by-Question Analysis:
-${worksheetResult.questionAnalyses.map((q, idx) => `
-Question ${idx + 1}:
-- Score: ${q.overallGrade}/${q.totalMarks}
-- Steps Analysis: ${q.stepByStepAnalysis.map(step => 
-  `  * ${step.step} (${step.isCorrect ? 'Correct' : 'Incorrect'}) - ${step.feedback}`
-).join('\\n')}
-
-`).join('\\n')}
 
 Based on this performance, provide a detailed analysis STRICTLY in the following JSON format:
 
@@ -219,7 +192,7 @@ Based on this performance, provide a detailed analysis STRICTLY in the following
     },
     "progressionStatus": {
         "level": "next-topic/review/intensive-review",
-        "next-topic": "specify the next topic name based on the current topic (${worksheetResult.topic}). If level is review/intensive-review, keep same topic",
+        "next-topic": "specify the next topic name based on the current topic (${worksheetResult.topic}). If level is review/intensive-review, keep same topic. If this is the last topic and performance is good, keep the same topic name",
         "next-topic-difficulty": "specify difficulty (easy/medium/hard) based on performance and previous attempts",
         "explanation": "detailed explanation of the recommendation",
         "confidenceScore": "number between 0-100 indicating confidence"
@@ -229,7 +202,7 @@ Based on this performance, provide a detailed analysis STRICTLY in the following
         "conceptsToReview": ["specific concepts needing review"]
     },
     "journeyStatus": {
-        "journey-complete": "yes/no - yes if student has mastered the last topic, no otherwise",
+        "journey-complete": "yes/no - yes if student has mastered the last topic with good performance , no otherwise",
         "endReason": "journey-complete/too-many-attempts - journey-complete if all topics mastered, too-many-attempts if struggling with easy difficulty"
     }
 }
@@ -261,7 +234,16 @@ For difficulty recommendations:
 - If recommending the same topic, consider increasing difficulty if they've done well - very important
 - If recommending a new topic, consider their mastery level of the current topic
 - For students who have struggled with easy difficulty multiple times, consider ending their journey
-- For students who excel at hard difficulty, they should progress to the next topic`;
+- For students who excel at hard difficulty, they should progress to the next topic UNLESS it's the last topic
+- For the last topic (Exponents and Logarithms):
+  * If performance is good (>= 80%) at hard difficulty, mark journey as complete
+  * If performance is not good enough at current difficulty, stay on same topic and increase difficulty if appropriate
+  * NEVER cycle back to first topic from last topic
+
+Remember: When on the last topic (Exponents and Logarithms), the student should either:
+1. Complete the journey (if performing well at hard difficulty)
+2. Stay on the same topic with same/increased difficulty (if needs more practice)
+But NEVER move back to the first topic.`;
 
     console.log('Sending progress check request to OpenAI...');
     
@@ -409,14 +391,31 @@ For difficulty recommendations:
     }
     
     // Force journey completion if we're on the last topic and performing well
-    if (isLastTopic && worksheetResult.percentageScore >= 80 && worksheetResult.difficulty === 'hard') {
+    if (isLastTopic && worksheetResult.percentageScore >= 80) {
       journeyComplete = true;
       endReason = 'completed_all_topics';
       console.log('Journey ending: Completed last topic with good performance');
+      
+      // Override AI's next-topic recommendation for last topic
+      progressAnalysis.progressionStatus['next-topic'] = worksheetResult.topic;
+      progressAnalysis.progressionStatus.level = 'next-topic';
+      progressAnalysis.journeyStatus['journey-complete'] = 'yes';
+      progressAnalysis.journeyStatus.endReason = 'journey-complete';
     }
     
     // Determine if journey should end based on our analysis
     shouldEndJourney = journeyComplete || (isSameTopic && isEasyDifficulty && hasTooManyEasyAttempts);
+
+    // If we're on the last topic but not completing the journey, ensure we stay on the same topic
+    if (isLastTopic && !journeyComplete) {
+      progressAnalysis.progressionStatus['next-topic'] = worksheetResult.topic;
+      if (worksheetResult.percentageScore >= 70) {
+        // If performance is good but not excellent, increase difficulty if possible
+        progressAnalysis.progressionStatus['next-topic-difficulty'] = 
+          worksheetResult.difficulty === 'easy' ? 'medium' :
+          worksheetResult.difficulty === 'medium' ? 'hard' : 'hard';
+      }
+    }
 
     // Update journey with new tasks if not ending
     if (!shouldEndJourney) {
